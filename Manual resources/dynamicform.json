@@ -1,0 +1,87 @@
+[
+  {
+    "label": "Select user account",
+    "fields": [
+      {
+        "key": "searchValue",
+        "templateOptions": {
+          "label": "Search (wildcard search in Name, Display name, UserPrincipalName and Mail)",
+          "placeholder": "Name, Display name, UserPrincipalName or Mail (use * to search all users)",
+          "required": true,
+          "minLength": 1
+        },
+        "type": "input",
+        "summaryVisibility": "Hide element",
+        "requiresTemplateOptions": true,
+        "requiresKey": true,
+        "requiresDataSource": false
+      },
+      {
+        "key": "gridUsers",
+        "templateOptions": {
+          "label": "Select user",
+          "required": true,
+          "grid": {
+            "columns": [
+              {
+                "headerName": "DisplayName",
+                "field": "DisplayName"
+              },
+              {
+                "headerName": "UserPrincipalName",
+                "field": "UserPrincipalName"
+              },
+              {
+                "headerName": "Department",
+                "field": "Department"
+              },
+              {
+                "headerName": "Title",
+                "field": "Title"
+              },
+              {
+                "headerName": "Description",
+                "field": "Description"
+              }
+            ],
+            "height": 300,
+            "rowSelection": "single"
+          },
+          "dataSourceConfig": {
+            "dataSourceGuid": "$dataSourceGuid_0",
+            "input": {
+              "propertyInputs": [
+                {
+                  "propertyName": "searchValue",
+                  "otherFieldValue": {
+                    "otherFieldKey": "searchValue"
+                  }
+                }
+              ]
+            }
+          },
+          "useFilter": true,
+          "allowCsvDownload": true
+        },
+        "type": "grid",
+        "summaryVisibility": "Show",
+        "requiresTemplateOptions": true,
+        "requiresKey": true,
+        "requiresDataSource": true
+      },
+      {
+        "key": "blnRevokeSessions",
+        "templateOptions": {
+          "label": "Revoke signin sessions",
+          "useSwitch": true,
+          "checkboxLabel": "Revoke"
+        },
+        "type": "boolean",
+        "summaryVisibility": "Show",
+        "requiresTemplateOptions": true,
+        "requiresKey": true,
+        "requiresDataSource": false
+      }
+    ]
+  }
+]

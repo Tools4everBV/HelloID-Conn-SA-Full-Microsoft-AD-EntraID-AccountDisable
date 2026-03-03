@@ -1,0 +1,513 @@
+# Set TLS to accept TLS, TLS 1.1 and TLS 1.2
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls12
+
+#HelloID variables
+#Note: when running this script inside HelloID; portalUrl and API credentials are provided automatically (generate and save API credentials first in your admin panel!)
+$portalUrl = "https://CUSTOMER.helloid.com"
+$apiKey = "API_KEY"
+$apiSecret = "API_SECRET"
+$delegatedFormAccessGroupNames = @("") #Only unique names are supported. Groups must exist!
+$delegatedFormCategories = @("Active Directory") #Only unique names are supported. Categories will be created if not exists
+$script:debugLogging = $false #Default value: $false. If $true, the HelloID resource GUIDs will be shown in the logging
+$script:duplicateForm = $false #Default value: $false. If $true, the HelloID resource names will be changed to import a duplicate Form
+$script:duplicateFormSuffix = "_tmp" #the suffix will be added to all HelloID resource names to generate a duplicate form with different resource names
+
+#The following HelloID Global variables are used by this form. No existing HelloID global variables will be overriden only new ones are created.
+#NOTE: You can also update the HelloID Global variable values afterwards in the HelloID Admin Portal: https://<CUSTOMER>.helloid.com/admin/variablelibrary
+$globalHelloIDVariables = [System.Collections.Generic.List[object]]@();
+
+#Global variable #1 >> EntraIdCertificatePassword
+$tmpName = @'
+EntraIdCertificatePassword
+'@ 
+$tmpValue = "" 
+$globalHelloIDVariables.Add([PSCustomObject]@{name = $tmpName; value = $tmpValue; secret = "True"});
+
+#Global variable #2 >> EntraIdCertificateBase64String
+$tmpName = @'
+EntraIdCertificateBase64String
+'@ 
+$tmpValue = "" 
+$globalHelloIDVariables.Add([PSCustomObject]@{name = $tmpName; value = $tmpValue; secret = "True"});
+
+#Global variable #3 >> EntraIdTenantId
+$tmpName = @'
+EntraIdTenantId
+'@ 
+$tmpValue = @'
+'@ 
+$globalHelloIDVariables.Add([PSCustomObject]@{name = $tmpName; value = $tmpValue; secret = "False"});
+
+#Global variable #4 >> EntraIdAppId
+$tmpName = @'
+EntraIdAppId
+'@ 
+$tmpValue = @'
+'@ 
+$globalHelloIDVariables.Add([PSCustomObject]@{name = $tmpName; value = $tmpValue; secret = "False"});
+
+#Global variable #5 >> AdUsersEnabledSearchOu
+$tmpName = @'
+AdUsersEnabledSearchOu
+'@ 
+$tmpValue = @'
+OU=Users,OU=enyoi,DC=enyoi,DC=local;OU=UsersLite,OU=enyoi,DC=enyoi,DC=local
+'@ 
+$globalHelloIDVariables.Add([PSCustomObject]@{name = $tmpName; value = $tmpValue; secret = "False"});
+
+
+#make sure write-information logging is visual
+$InformationPreference = "continue"
+
+# Check for prefilled API Authorization header
+if (-not [string]::IsNullOrEmpty($portalApiBasic)) {
+    $script:headers = @{"authorization" = $portalApiBasic}
+    Write-Information "Using prefilled API credentials"
+} else {
+    # Create authorization headers with HelloID API key
+    $pair = "$apiKey" + ":" + "$apiSecret"
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes($pair)
+    $base64 = [System.Convert]::ToBase64String($bytes)
+    $key = "Basic $base64"
+    $script:headers = @{"authorization" = $Key}
+    Write-Information "Using manual API credentials"
+}
+
+# Check for prefilled PortalBaseURL
+if (-not [string]::IsNullOrEmpty($portalBaseUrl)) {
+    $script:PortalBaseUrl = $portalBaseUrl
+    Write-Information "Using prefilled PortalURL: $script:PortalBaseUrl"
+} else {
+    $script:PortalBaseUrl = $portalUrl
+    Write-Information "Using manual PortalURL: $script:PortalBaseUrl"
+}
+
+# Define specific endpoint URI
+$script:PortalBaseUrl = $script:PortalBaseUrl.trim("/") + "/"  
+
+# Make sure to reveive an empty array using PowerShell Core
+function ConvertFrom-Json-WithEmptyArray([string]$jsonString) {
+    # Running in PowerShell Core?
+    if($IsCoreCLR -eq $true){
+        $r = [Object[]]($jsonString | ConvertFrom-Json -NoEnumerate)
+        return ,$r  # Force return value to be an array using a comma
+    } else {
+        $r = [Object[]]($jsonString | ConvertFrom-Json)
+        return ,$r  # Force return value to be an array using a comma
+    }
+}
+
+function Invoke-HelloIDGlobalVariable {
+    param(
+        [parameter(Mandatory)][String]$Name,
+        [parameter(Mandatory)][String][AllowEmptyString()]$Value,
+        [parameter(Mandatory)][String]$Secret
+    )
+
+    $Name = $Name + $(if ($script:duplicateForm -eq $true) { $script:duplicateFormSuffix })
+
+    try {
+        $uri = ($script:PortalBaseUrl + "api/v1/automation/variables/named/$Name")
+        $response = Invoke-RestMethod -Method Get -Uri $uri -Headers $script:headers -ContentType "application/json" -Verbose:$false
+
+        if ([string]::IsNullOrEmpty($response.automationVariableGuid)) {
+            #Create Variable
+            $body = @{
+                name     = $Name;
+                value    = $Value;
+                secret   = $Secret;
+                ItemType = 0;
+            }    
+            $body = ConvertTo-Json -InputObject $body -Depth 100
+
+            $uri = ($script:PortalBaseUrl + "api/v1/automation/variable")
+            $response = Invoke-RestMethod -Method Post -Uri $uri -Headers $script:headers -ContentType "application/json" -Verbose:$false -Body $body
+            $variableGuid = $response.automationVariableGuid
+
+            Write-Information "Variable '$Name' created$(if ($script:debugLogging -eq $true) { ": " + $variableGuid })"
+        } else {
+            $variableGuid = $response.automationVariableGuid
+            Write-Warning "Variable '$Name' already exists$(if ($script:debugLogging -eq $true) { ": " + $variableGuid })"
+        }
+    } catch {
+        Write-Error "Variable '$Name', message: $_"
+    }
+}
+
+function Invoke-HelloIDAutomationTask {
+    param(
+        [parameter(Mandatory)][String]$TaskName,
+        [parameter(Mandatory)][String]$UseTemplate,
+        [parameter(Mandatory)][String]$AutomationContainer,
+        [parameter(Mandatory)][String][AllowEmptyString()]$Variables,
+        [parameter(Mandatory)][String]$PowershellScript,
+        [parameter()][String][AllowEmptyString()]$ObjectGuid,
+        [parameter()][String][AllowEmptyString()]$ForceCreateTask,
+        [parameter(Mandatory)][Ref]$returnObject
+    )
+
+    $TaskName = $TaskName + $(if ($script:duplicateForm -eq $true) { $script:duplicateFormSuffix })
+
+    try {
+        $uri = ($script:PortalBaseUrl +"api/v1/automationtasks?search=$TaskName&container=$AutomationContainer")
+        $responseRaw = (Invoke-RestMethod -Method Get -Uri $uri -Headers $script:headers -ContentType "application/json" -Verbose:$false) 
+        $response = $responseRaw | Where-Object -filter {$_.name -eq $TaskName}
+
+        if([string]::IsNullOrEmpty($response.automationTaskGuid) -or $ForceCreateTask -eq $true) {
+            #Create Task
+
+            $body = @{
+                name                = $TaskName;
+                useTemplate         = $UseTemplate;
+                powerShellScript    = $PowershellScript;
+                automationContainer = $AutomationContainer;
+                objectGuid          = $ObjectGuid;
+                variables           = (ConvertFrom-Json-WithEmptyArray($Variables));
+            }
+            $body = ConvertTo-Json -InputObject $body -Depth 100
+
+            $uri = ($script:PortalBaseUrl +"api/v1/automationtasks/powershell")
+            $response = Invoke-RestMethod -Method Post -Uri $uri -Headers $script:headers -ContentType "application/json" -Verbose:$false -Body $body
+            $taskGuid = $response.automationTaskGuid
+
+            Write-Information "Powershell task '$TaskName' created$(if ($script:debugLogging -eq $true) { ": " + $taskGuid })"
+        } else {
+            #Get TaskGUID
+            $taskGuid = $response.automationTaskGuid
+            Write-Warning "Powershell task '$TaskName' already exists$(if ($script:debugLogging -eq $true) { ": " + $taskGuid })"
+        }
+    } catch {
+        Write-Error "Powershell task '$TaskName', message: $_"
+    }
+
+    $returnObject.Value = $taskGuid
+}
+
+function Invoke-HelloIDDatasource {
+    param(
+        [parameter(Mandatory)][String]$DatasourceName,
+        [parameter(Mandatory)][String]$DatasourceType,
+        [parameter(Mandatory)][String][AllowEmptyString()]$DatasourceModel,
+        [parameter()][String][AllowEmptyString()]$DatasourceStaticValue,
+        [parameter()][String][AllowEmptyString()]$DatasourcePsScript,        
+        [parameter()][String][AllowEmptyString()]$DatasourceInput,
+        [parameter()][String][AllowEmptyString()]$AutomationTaskGuid,
+        [parameter()][String][AllowEmptyString()]$DatasourceRunInCloud,
+        [parameter(Mandatory)][Ref]$returnObject
+    )
+
+    $DatasourceName = $DatasourceName + $(if ($script:duplicateForm -eq $true) { $script:duplicateFormSuffix })
+
+    $datasourceTypeName = switch($DatasourceType) { 
+        "1" { "Native data source"; break} 
+        "2" { "Static data source"; break} 
+        "3" { "Task data source"; break} 
+        "4" { "Powershell data source"; break}
+    }
+
+    try {
+        $uri = ($script:PortalBaseUrl +"api/v1/datasource/named/$DatasourceName")
+        $response = Invoke-RestMethod -Method Get -Uri $uri -Headers $script:headers -ContentType "application/json" -Verbose:$false
+    
+        if([string]::IsNullOrEmpty($response.dataSourceGUID)) {
+            #Create DataSource
+            $body = @{
+                name               = $DatasourceName;
+                type               = $DatasourceType;
+                model              = (ConvertFrom-Json-WithEmptyArray($DatasourceModel));
+                automationTaskGUID = $AutomationTaskGuid;
+                value              = (ConvertFrom-Json-WithEmptyArray($DatasourceStaticValue));
+                script             = $DatasourcePsScript;
+                input              = (ConvertFrom-Json-WithEmptyArray($DatasourceInput));
+                runInCloud         = $DatasourceRunInCloud;
+            }
+            $body = ConvertTo-Json -InputObject $body -Depth 100
+    
+            $uri = ($script:PortalBaseUrl +"api/v1/datasource")
+            $response = Invoke-RestMethod -Method Post -Uri $uri -Headers $script:headers -ContentType "application/json" -Verbose:$false -Body $body
+            
+            $datasourceGuid = $response.dataSourceGUID
+            Write-Information "$datasourceTypeName '$DatasourceName' created$(if ($script:debugLogging -eq $true) { ": " + $datasourceGuid })"
+        } else {
+            #Get DatasourceGUID
+            $datasourceGuid = $response.dataSourceGUID
+            Write-Warning "$datasourceTypeName '$DatasourceName' already exists$(if ($script:debugLogging -eq $true) { ": " + $datasourceGuid })"
+        }
+    } catch {
+        Write-Error "$datasourceTypeName '$DatasourceName', message: $_"
+    }
+
+    $returnObject.Value = $datasourceGuid
+}
+
+function Invoke-HelloIDDynamicForm {
+    param(
+        [parameter(Mandatory)][String]$FormName,
+        [parameter(Mandatory)][String]$FormSchema,
+        [parameter(Mandatory)][Ref]$returnObject
+    )
+
+    $FormName = $FormName + $(if ($script:duplicateForm -eq $true) { $script:duplicateFormSuffix })
+
+    try {
+        try {
+            $uri = ($script:PortalBaseUrl +"api/v1/forms/$FormName")
+            $response = Invoke-RestMethod -Method Get -Uri $uri -Headers $script:headers -ContentType "application/json" -Verbose:$false
+        } catch {
+            $response = $null
+        }
+
+        if(([string]::IsNullOrEmpty($response.dynamicFormGUID)) -or ($response.isUpdated -eq $true)) {
+            #Create Dynamic form
+            $body = @{
+                Name       = $FormName;
+                FormSchema = (ConvertFrom-Json-WithEmptyArray($FormSchema));
+            }
+            $body = ConvertTo-Json -InputObject $body -Depth 100
+
+            $uri = ($script:PortalBaseUrl +"api/v1/forms")
+            $response = Invoke-RestMethod -Method Post -Uri $uri -Headers $script:headers -ContentType "application/json" -Verbose:$false -Body $body
+
+            $formGuid = $response.dynamicFormGUID
+            Write-Information "Dynamic form '$formName' created$(if ($script:debugLogging -eq $true) { ": " + $formGuid })"
+        } else {
+            $formGuid = $response.dynamicFormGUID
+            Write-Warning "Dynamic form '$FormName' already exists$(if ($script:debugLogging -eq $true) { ": " + $formGuid })"
+        }
+    } catch {
+        Write-Error "Dynamic form '$FormName', message: $_"
+    }
+
+    $returnObject.Value = $formGuid
+}
+
+
+function Invoke-HelloIDDelegatedForm {
+    param(
+        [parameter(Mandatory)][String]$DelegatedFormName,
+        [parameter(Mandatory)][String]$DynamicFormGuid,
+        [parameter()][Array][AllowEmptyString()]$AccessGroups,
+        [parameter()][String][AllowEmptyString()]$Categories,
+        [parameter(Mandatory)][String]$UseFaIcon,
+        [parameter()][String][AllowEmptyString()]$FaIcon,
+        [parameter()][String][AllowEmptyString()]$task,
+        [parameter(Mandatory)][Ref]$returnObject
+    )
+    $delegatedFormCreated = $false
+    $DelegatedFormName = $DelegatedFormName + $(if ($script:duplicateForm -eq $true) { $script:duplicateFormSuffix })
+
+    try {
+        try {
+            $uri = ($script:PortalBaseUrl +"api/v1/delegatedforms/$DelegatedFormName")
+            $response = Invoke-RestMethod -Method Get -Uri $uri -Headers $script:headers -ContentType "application/json" -Verbose:$false
+        } catch {
+            $response = $null
+        }
+
+        if([string]::IsNullOrEmpty($response.delegatedFormGUID)) {
+            #Create DelegatedForm
+            $body = @{
+                name            = $DelegatedFormName;
+                dynamicFormGUID = $DynamicFormGuid;
+                isEnabled       = "True";
+                useFaIcon       = $UseFaIcon;
+                faIcon          = $FaIcon;
+                task            = ConvertFrom-Json -inputObject $task;
+            }
+            if(-not[String]::IsNullOrEmpty($AccessGroups)) { 
+                $body += @{
+                    accessGroups    = (ConvertFrom-Json-WithEmptyArray($AccessGroups));
+                }
+            }
+            $body = ConvertTo-Json -InputObject $body -Depth 100
+
+            $uri = ($script:PortalBaseUrl +"api/v1/delegatedforms")
+            $response = Invoke-RestMethod -Method Post -Uri $uri -Headers $script:headers -ContentType "application/json" -Verbose:$false -Body $body
+
+            $delegatedFormGuid = $response.delegatedFormGUID
+            Write-Information "Delegated form '$DelegatedFormName' created$(if ($script:debugLogging -eq $true) { ": " + $delegatedFormGuid })"
+            $delegatedFormCreated = $true
+
+            $bodyCategories = $Categories
+            $uri = ($script:PortalBaseUrl +"api/v1/delegatedforms/$delegatedFormGuid/categories")
+            $response = Invoke-RestMethod -Method Post -Uri $uri -Headers $script:headers -ContentType "application/json" -Verbose:$false -Body $bodyCategories
+            Write-Information "Delegated form '$DelegatedFormName' updated with categories"
+        } else {
+            #Get delegatedFormGUID
+            $delegatedFormGuid = $response.delegatedFormGUID
+            Write-Warning "Delegated form '$DelegatedFormName' already exists$(if ($script:debugLogging -eq $true) { ": " + $delegatedFormGuid })"
+        }
+    } catch {
+        Write-Error "Delegated form '$DelegatedFormName', message: $_"
+    }
+
+    $returnObject.value.guid = $delegatedFormGuid
+    $returnObject.value.created = $delegatedFormCreated
+}
+
+<# Begin: HelloID Global Variables #>
+foreach ($item in $globalHelloIDVariables) {
+	Invoke-HelloIDGlobalVariable -Name $item.name -Value $item.value -Secret $item.secret 
+}
+<# End: HelloID Global Variables #>
+
+
+<# Begin: HelloID Data sources #>
+<# Begin: DataSource "ad-and-entra-id-account-disable | AD-Get-Enabled-Users-Wildcard-Name-DisplayName-UPN-Mail" #>
+$tmpPsScript = @'
+# Variables configured in form
+$searchValue = $dataSource.searchValue
+if ($searchValue -eq "*") {
+    $filter = "Enabled -eq `$true -and (Name -like '*')"
+}
+else {
+    $filter = "Enabled -eq `$true -and (Name -like '*$searchValue*' -or DisplayName -like '*$searchValue*' -or userPrincipalName -like '*$searchValue*' -or mail -like '*$searchValue*')"
+}
+
+# Global variables
+$searchOUs = $AdUsersEnabledSearchOu
+
+# Fixed values
+$propertiesToSelect = @(
+    "ObjectGuid",
+    "SamAccountName",
+    "DisplayName",
+    "UserPrincipalName",
+    "Enabled",
+    "Description", 
+    "Company",
+    "Department",
+    "Title"
+) # Properties to select from Microsoft AD, comma separated
+
+# Set debug logging
+$VerbosePreference = "SilentlyContinue"
+$InformationPreference = "Continue"
+$WarningPreference = "Continue"
+
+try {
+    #region Searching user
+    $actionMessage = "querying AD account(s) matching the filter [$filter] in OU(s) [$($searchOUs)]"
+
+    $ous = $searchOUs -split ';'
+    $adUsers = [System.Collections.ArrayList]@()
+    foreach ($ou in $ous) {
+        $actionMessage = "querying AD account(s) matching the filter [$filter] in OU [$($ou)]"
+        $getAdUsersSplatParams = @{
+            Filter      = $filter
+            Searchbase  = $ou
+            Properties  = $propertiesToSelect
+            Verbose     = $False
+            ErrorAction = "Stop"
+        }
+        $getAdUsersResponse = Get-AdUser @getAdUsersSplatParams | Select-Object -Property $propertiesToSelect
+
+        if ($getAdUsersResponse -is [array]) {
+            [void]$adUsers.AddRange($getAdUsersResponse)
+        }
+        else {
+            [void]$adUsers.Add($getAdUsersResponse)
+        }
+    }
+    Write-Information "Queried AD account(s) matching the filter [$filter] in OU(s) [$($searchOUs)]. Result count: $(($adUsers | Measure-Object).Count)"
+
+    # Sort and Send results to HelloID
+    $actionMessage = "sending results to HelloID"
+    $adUsers | Sort-Object -Property DisplayName | ForEach-Object {
+        Write-Output $_
+    }
+}
+catch {
+    $ex = $PSItem
+    Write-Warning "Error at Line [$($ex.InvocationInfo.ScriptLineNumber)]: $($ex.InvocationInfo.Line). Error: $($ex.Exception.Message)"
+    Write-Error "Error $($actionMessage). Error: $($ex.Exception.Message)"
+    # exit # use when using multiple try/catch and the script must stop
+}
+'@ 
+$tmpModel = @'
+[{"key":"ObjectGuid","type":0},{"key":"SamAccountName","type":0},{"key":"DisplayName","type":0},{"key":"UserPrincipalName","type":0},{"key":"Enabled","type":0},{"key":"Description","type":0},{"key":"Company","type":0},{"key":"Department","type":0},{"key":"Title","type":0}]
+'@ 
+$tmpInput = @'
+[{"description":null,"translateDescription":false,"inputFieldType":1,"key":"searchValue","type":0,"options":1}]
+'@ 
+$dataSourceGuid_0 = [PSCustomObject]@{} 
+$dataSourceGuid_0_Name = @'
+ad-and-entra-id-account-disable | AD-Get-Enabled-Users-Wildcard-Name-DisplayName-UPN-Mail
+'@ 
+Invoke-HelloIDDatasource -DatasourceName $dataSourceGuid_0_Name -DatasourceType "4" -DatasourceInput $tmpInput -DatasourcePsScript $tmpPsScript -DatasourceModel $tmpModel -DataSourceRunInCloud "False" -returnObject ([Ref]$dataSourceGuid_0) 
+<# End: DataSource "ad-and-entra-id-account-disable | AD-Get-Enabled-Users-Wildcard-Name-DisplayName-UPN-Mail" #>
+<# End: HelloID Data sources #>
+
+<# Begin: Dynamic Form "AD & Entra ID - Account Disable" #>
+$tmpSchema = @"
+[{"label":"Select user account","fields":[{"key":"searchValue","templateOptions":{"label":"Search (wildcard search in Name, Display name, UserPrincipalName and Mail)","placeholder":"Name, Display name, UserPrincipalName or Mail (use * to search all users)","required":true,"minLength":1},"type":"input","summaryVisibility":"Hide element","requiresTemplateOptions":true,"requiresKey":true,"requiresDataSource":false},{"key":"gridUsers","templateOptions":{"label":"Select user","required":true,"grid":{"columns":[{"headerName":"DisplayName","field":"DisplayName"},{"headerName":"UserPrincipalName","field":"UserPrincipalName"},{"headerName":"Department","field":"Department"},{"headerName":"Title","field":"Title"},{"headerName":"Description","field":"Description"}],"height":300,"rowSelection":"single"},"dataSourceConfig":{"dataSourceGuid":"$dataSourceGuid_0","input":{"propertyInputs":[{"propertyName":"searchValue","otherFieldValue":{"otherFieldKey":"searchValue"}}]}},"useFilter":true,"allowCsvDownload":true},"type":"grid","summaryVisibility":"Show","requiresTemplateOptions":true,"requiresKey":true,"requiresDataSource":true},{"key":"blnRevokeSessions","templateOptions":{"label":"Revoke signin sessions","useSwitch":true,"checkboxLabel":"Revoke"},"type":"boolean","summaryVisibility":"Show","requiresTemplateOptions":true,"requiresKey":true,"requiresDataSource":false}]}]
+"@ 
+
+$dynamicFormGuid = [PSCustomObject]@{} 
+$dynamicFormName = @'
+AD & Entra ID - Account Disable
+'@ 
+Invoke-HelloIDDynamicForm -FormName $dynamicFormName -FormSchema $tmpSchema  -returnObject ([Ref]$dynamicFormGuid) 
+<# END: Dynamic Form #>
+
+<# Begin: Delegated Form Access Groups and Categories #>
+$delegatedFormAccessGroupGuids = @()
+if(-not[String]::IsNullOrEmpty($delegatedFormAccessGroupNames)){
+    foreach($group in $delegatedFormAccessGroupNames) {
+        try {
+            $uri = ($script:PortalBaseUrl +"api/v1/groups/$group")
+            $response = Invoke-RestMethod -Method Get -Uri $uri -Headers $script:headers -ContentType "application/json" -Verbose:$false
+            $delegatedFormAccessGroupGuid = $response.groupGuid
+            $delegatedFormAccessGroupGuids += $delegatedFormAccessGroupGuid
+        
+            Write-Information "HelloID (access)group '$group' successfully found$(if ($script:debugLogging -eq $true) { ": " + $delegatedFormAccessGroupGuid })"
+        } catch {
+            Write-Error "HelloID (access)group '$group', message: $_"
+        }
+    }
+    if($null -ne $delegatedFormAccessGroupGuids){
+        $delegatedFormAccessGroupGuids = ($delegatedFormAccessGroupGuids | Select-Object -Unique | ConvertTo-Json -Depth 100 -Compress)
+    }
+}
+
+$delegatedFormCategoryGuids = @()
+foreach($category in $delegatedFormCategories) {
+    try {
+        $uri = ($script:PortalBaseUrl +"api/v1/delegatedformcategories/$category")
+        $response = Invoke-RestMethod -Method Get -Uri $uri -Headers $script:headers -ContentType "application/json" -Verbose:$false
+        $response = $response | Where-Object {$_.name.en -eq $category}
+    
+        $tmpGuid = $response.delegatedFormCategoryGuid
+        $delegatedFormCategoryGuids += $tmpGuid
+    
+        Write-Information "HelloID Delegated Form category '$category' successfully found$(if ($script:debugLogging -eq $true) { ": " + $tmpGuid })"
+    } catch {
+        Write-Warning "HelloID Delegated Form category '$category' not found"
+        $body = @{
+            name = @{"en" = $category};
+        }
+        $body = ConvertTo-Json -InputObject $body -Depth 100
+
+        $uri = ($script:PortalBaseUrl +"api/v1/delegatedformcategories")
+        $response = Invoke-RestMethod -Method Post -Uri $uri -Headers $script:headers -ContentType "application/json" -Verbose:$false -Body $body
+        $tmpGuid = $response.delegatedFormCategoryGuid
+        $delegatedFormCategoryGuids += $tmpGuid
+
+        Write-Information "HelloID Delegated Form category '$category' successfully created$(if ($script:debugLogging -eq $true) { ": " + $tmpGuid })"
+    }
+}
+$delegatedFormCategoryGuids = (ConvertTo-Json -InputObject $delegatedFormCategoryGuids -Depth 100 -Compress)
+<# End: Delegated Form Access Groups and Categories #>
+
+<# Begin: Delegated Form #>
+$delegatedFormRef = [PSCustomObject]@{guid = $null; created = $null} 
+$delegatedFormName = @'
+AD & Entra ID - Account Disable
+'@
+$tmpTask = @'
+{"name":"AD & Entra ID - Account Disable","script":"# variables configured in form\r\n$user = $form.gridUsers\r\n\r\n# Global variables\r\n# Outcommented as these are set from Global Variables\r\n# $EntraIdTenantId = \"\"\r\n# $EntraIdAppId = \"\"\r\n# $EntraIdCertificateBase64String = \"\"\r\n# $EntraIdCertificatePassword = \"\"\r\n\r\n# Enable TLS1.2\r\n[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12\r\n\r\n# Set debug logging\r\n$VerbosePreference = \"SilentlyContinue\"\r\n$InformationPreference = \"Continue\"\r\n$WarningPreference = \"Continue\"\r\n\r\n#region functions\r\nfunction Resolve-MicrosoftGraphAPIError {\r\n    [CmdletBinding()]\r\n    param (\r\n        [Parameter(Mandatory)]\r\n        [object]\r\n        $ErrorObject\r\n    )\r\n    process {\r\n        $httpErrorObj = [PSCustomObject]@{\r\n            ScriptLineNumber = $ErrorObject.InvocationInfo.ScriptLineNumber\r\n            Line             = $ErrorObject.InvocationInfo.Line\r\n            ErrorDetails     = $ErrorObject.Exception.Message\r\n            FriendlyMessage  = $ErrorObject.Exception.Message\r\n        }\r\n        if (-not [string]::IsNullOrEmpty($ErrorObject.ErrorDetails.Message)) {\r\n            $httpErrorObj.ErrorDetails = $ErrorObject.ErrorDetails.Message\r\n        }\r\n        elseif ($ErrorObject.Exception.GetType().FullName -eq 'System.Net.WebException') {\r\n            if ($null -ne $ErrorObject.Exception.Response) {\r\n                $streamReaderResponse = [System.IO.StreamReader]::new($ErrorObject.Exception.Response.GetResponseStream()).ReadToEnd()\r\n                if (-not [string]::IsNullOrEmpty($streamReaderResponse)) {\r\n                    $httpErrorObj.ErrorDetails = $streamReaderResponse\r\n                }\r\n            }\r\n        }\r\n        try {\r\n            $errorDetailsObject = ($httpErrorObj.ErrorDetails | ConvertFrom-Json -ErrorAction Stop)\r\n            if ($errorDetailsObject.error_description) {\r\n                $httpErrorObj.FriendlyMessage = $errorDetailsObject.error_description\r\n            }\r\n            elseif ($errorDetailsObject.error.message) {\r\n                $httpErrorObj.FriendlyMessage = \"$($errorDetailsObject.error.code): $($errorDetailsObject.error.message)\"\r\n            }\r\n            elseif ($errorDetailsObject.error.details.message) {\r\n                $httpErrorObj.FriendlyMessage = \"$($errorDetailsObject.error.details.code): $($errorDetailsObject.error.details.message)\"\r\n            }\r\n            else {\r\n                $httpErrorObj.FriendlyMessage = $httpErrorObj.ErrorDetails\r\n            }\r\n        }\r\n        catch {\r\n            $httpErrorObj.FriendlyMessage = $httpErrorObj.ErrorDetails\r\n        }\r\n        Write-Output $httpErrorObj\r\n    }\r\n}\r\n\r\nfunction Get-MSEntraAccessToken {\r\n    [CmdletBinding()]\r\n    param(\r\n        [Parameter(Mandatory)]\r\n        [ValidateNotNull()]\r\n        $Certificate,\r\n        \r\n        [Parameter(Mandatory)]\r\n        [ValidateNotNullOrEmpty()]\r\n        [string]\r\n        $AppId,\r\n        \r\n        [Parameter(Mandatory)]\r\n        [ValidateNotNullOrEmpty()]\r\n        [string]\r\n        $TenantId\r\n    )\r\n    try {\r\n        # Get the DER encoded bytes of the certificate\r\n        $derBytes = $Certificate.RawData\r\n\r\n        # Compute the SHA-256 hash of the DER encoded bytes\r\n        $sha256 = [System.Security.Cryptography.SHA256]::Create()\r\n        $hashBytes = $sha256.ComputeHash($derBytes)\r\n        $base64Thumbprint = [System.Convert]::ToBase64String($hashBytes).Replace('+', '-').Replace('/', '_').Replace('=', '')\r\n\r\n        # Create a JWT (JSON Web Token) header\r\n        $header = @{\r\n            'alg'      = 'RS256'\r\n            'typ'      = 'JWT'\r\n            'x5t#S256' = $base64Thumbprint\r\n        } | ConvertTo-Json\r\n        $base64Header = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($header))\r\n\r\n        # Calculate the Unix timestamp (seconds since 1970-01-01T00:00:00Z) for 'exp', 'nbf' and 'iat'\r\n        $currentUnixTimestamp = [math]::Round(((Get-Date).ToUniversalTime() - ([datetime]'1970-01-01T00:00:00Z').ToUniversalTime()).TotalSeconds)\r\n\r\n        # Create a JWT payload\r\n        $payload = [Ordered]@{\r\n            'iss' = \"$($AppId)\"\r\n            'sub' = \"$($AppId)\"\r\n            'aud' = \"https://login.microsoftonline.com/$($TenantId)/oauth2/token\"\r\n            'exp' = ($currentUnixTimestamp + 3600) # Expires in 1 hour\r\n            'nbf' = ($currentUnixTimestamp - 300) # Not before 5 minutes ago\r\n            'iat' = $currentUnixTimestamp\r\n            'jti' = [Guid]::NewGuid().ToString()\r\n        } | ConvertTo-Json\r\n        $base64Payload = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($payload)).Replace('+', '-').Replace('/', '_').Replace('=', '')\r\n\r\n        # Extract the private key from the certificate\r\n        $rsaPrivate = $Certificate.PrivateKey\r\n        $rsa = [System.Security.Cryptography.RSACryptoServiceProvider]::new()\r\n        $rsa.ImportParameters($rsaPrivate.ExportParameters($true))\r\n\r\n        # Sign the JWT\r\n        $signatureInput = \"$base64Header.$base64Payload\"\r\n        $signature = $rsa.SignData([Text.Encoding]::UTF8.GetBytes($signatureInput), 'SHA256')\r\n        $base64Signature = [System.Convert]::ToBase64String($signature).Replace('+', '-').Replace('/', '_').Replace('=', '')\r\n\r\n        # Create the JWT token\r\n        $jwtToken = \"$($base64Header).$($base64Payload).$($base64Signature)\"\r\n\r\n        $createEntraAccessTokenBody = @{\r\n            grant_type            = 'client_credentials'\r\n            client_id             = $AppId\r\n            client_assertion_type = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'\r\n            client_assertion      = $jwtToken\r\n            resource              = 'https://graph.microsoft.com'\r\n        }\r\n\r\n        $createEntraAccessTokenSplatParams = @{\r\n            Uri         = \"https://login.microsoftonline.com/$($TenantId)/oauth2/token\"\r\n            Body        = $createEntraAccessTokenBody\r\n            Method      = 'POST'\r\n            ContentType = 'application/x-www-form-urlencoded'\r\n            Verbose     = $false\r\n            ErrorAction = 'Stop'\r\n        }\r\n\r\n        $createEntraAccessTokenResponse = Invoke-RestMethod @createEntraAccessTokenSplatParams\r\n        Write-Output $createEntraAccessTokenResponse.access_token\r\n    }\r\n    catch {\r\n        $PSCmdlet.ThrowTerminatingError($_)\r\n    }\r\n}\r\n\r\nfunction Get-MSEntraCertificate {\r\n    [CmdletBinding()]\r\n    param(\r\n        [Parameter(Mandatory)]\r\n        [ValidateNotNullOrEmpty()]\r\n        [string]\r\n        $CertificateBase64String,\r\n        \r\n        [Parameter(Mandatory)]\r\n        [ValidateNotNullOrEmpty()]\r\n        [string]\r\n        $CertificatePassword\r\n    )\r\n    try {\r\n        $rawCertificate = [system.convert]::FromBase64String($CertificateBase64String)\r\n        $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($rawCertificate, $CertificatePassword, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable)\r\n        Write-Output $certificate\r\n    }\r\n    catch {\r\n        $PSCmdlet.ThrowTerminatingError($_)\r\n    }\r\n}\r\n#endregion functions\r\n\r\n#region AD action\r\ntry {\r\n    $actionMessage = \"disabling AD account for user [$($user.userPrincipalName)] with objectguid [$($user.ObjectGuid)]\"\r\n\r\n    Disable-ADAccount -Identity $user.ObjectGuid\r\n\r\n    $Log = @{\r\n        Action            = \"DisableAccount\" # optional. ENUM (undefined = default) \r\n        System            = \"ActiveDirectory\" # optional (free format text) \r\n        Message           = \"Disabled AD account: [$($user.userPrincipalName)] with objectguid [$($user.ObjectGuid)]\" # required (free format text) \r\n        IsError           = $false # optional. Elastic reporting purposes only. (default = $false. $true = Executed action returned an error) \r\n        TargetDisplayName = $user.userPrincipalName # optional (free format text) \r\n        TargetIdentifier  = $user.ObjectGuid # optional (free format text) \r\n    }\r\n    Write-Information -Tags \"Audit\" -MessageData $log\r\n}\r\ncatch {\r\n    $ex = $PSItem\r\n    $auditMessage = \"Error $($actionMessage). Error: $($ex.Exception.Message)\"\r\n    $warningMessage = \"Error at Line [$($ex.InvocationInfo.ScriptLineNumber)]: $($ex.InvocationInfo.Line). Error: $($ex.Exception.Message)\"\r\n    \r\n    $log = @{\r\n        Action            = \"DisableAccount\" # optional. ENUM (undefined = default) \r\n        System            = \"ActiveDirectory\" # optional (free format text) \r\n        Message           = $auditMessage # required (free format text) \r\n        IsError           = $true # optional. Elastic reporting purposes only. (default = $false. $true = Executed action returned an error) \r\n        TargetDisplayName = $user.userPrincipalName # optional (free format text) \r\n        TargetIdentifier  = $user.ObjectGuid # optional (free format text) \r\n    }\r\n    Write-Information -Tags \"Audit\" -MessageData $log\r\n    Write-Warning $warningMessage   \r\n    Write-Error $auditMessage\r\n}\r\n#endregion AD action\r\n\r\n#region Entra ID action\r\ntry {\r\n    # Convert base64 certificate string to certificate object\r\n    $actionMessage = \"converting base64 certificate string to certificate object\"\r\n    $certificate = Get-MSEntraCertificate -CertificateBase64String $EntraIdCertificateBase64String -CertificatePassword $EntraIdCertificatePassword\r\n    Write-Verbose \"Converted base64 certificate string to certificate object\"\r\n\r\n    # Create access token\r\n    $actionMessage = \"creating access token\"\r\n    $entraToken = Get-MSEntraAccessToken -Certificate $certificate -AppId $EntraIdAppId -TenantId $EntraIdTenantId\r\n    Write-Verbose \"Created access token\"\r\n\r\n    # Create headers\r\n    $actionMessage = \"creating headers\"\r\n    $headers = @{\r\n        \"Authorization\"    = \"Bearer $($entraToken)\"\r\n        \"Accept\"           = \"application/json\"\r\n        \"Content-Type\"     = \"application/json\"\r\n        \"ConsistencyLevel\" = \"eventual\" # Needed to filter on specific attributes (https://docs.microsoft.com/en-us/graph/aad-advanced-queries)\r\n    }\r\n    Write-Verbose \"Created headers\"\r\n\r\n    # Disable user\r\n    # API docs: https://learn.microsoft.com/en-us/graph/api/user-update?view=graph-rest-1.0&tabs=http\r\n    $actionMessage = \"disabling user [$($user.displayName)] with userPrincipalName [$($user.userPrincipalName)]\"\r\n    $disableUserBody = @{ \r\n        \"accountEnabled\" = $false\r\n    }\r\n    $disableUserSplatParams = @{\r\n        Uri         = \"https://graph.microsoft.com/v1.0/users/$($user.userPrincipalName)\"\r\n        Headers     = $headers\r\n        Method      = \"PATCH\"\r\n        Body        = ($disableUserBody | ConvertTo-Json -Depth 10)\r\n        Verbose     = $false\r\n        ErrorAction = \"Stop\"\r\n    }\r\n    $disableUserResponse = Invoke-RestMethod @disableUserSplatParams\r\n    \r\n    $Log = @{\r\n        Action            = \"DisableAccount\" # optional. ENUM (undefined = default) \r\n        System            = \"EntraID\" # optional (free format text) \r\n        Message           = \"Disabled user [$($user.displayName)] with userPrincipalName [$($user.userPrincipalName)]\" # required (free format text) \r\n        IsError           = $false # optional. Elastic reporting purposes only. (default = $false. $true = Executed action returned an error) \r\n        TargetDisplayName = $user.displayName # optional (free format text)\r\n        TargetIdentifier  = $user.userPrincipalName # optional (free format text)\r\n    }\r\n    Write-Information -Tags \"Audit\" -MessageData $log\r\n\r\n    if ($blnRevokeSignInSessions -eq $true) {\r\n        # Revoke signin sessions\r\n        # API docs: https://learn.microsoft.com/en-us/graph/api/user-revokesigninsessions?view=graph-rest-1.0&tabs=http\r\n        $actionMessage = \"revoking signin sessions of user [$($user.displayName)] with id [$($user.id)]\"\r\n        $revokeUserSignInSplatParams = @{\r\n            Uri         = \"https://graph.microsoft.com/v1.0/users/$($user.id)/revokeSignInSessions\"\r\n            Headers     = $headers\r\n            Method      = \"POST\"\r\n            Verbose     = $false\r\n            ErrorAction = \"Stop\"\r\n        }\r\n        $revokeUserSignInResponse = Invoke-RestMethod @revokeUserSignInSplatParams\r\n        \r\n        $Log = @{\r\n            Action            = \"DisableAccount\" # optional. ENUM (undefined = default) \r\n            System            = \"EntraID\" # optional (free format text) \r\n            Message           = \"Revoked signin sessions of user [$($user.displayName)] with id [$($user.id)\" # required (free format text) \r\n            IsError           = $false # optional. Elastic reporting purposes only. (default = $false. $true = Executed action returned an error) \r\n            TargetDisplayName = $user.displayName # optional (free format text)\r\n            TargetIdentifier  = $user.id # optional (free format text)\r\n        }\r\n        Write-Information -Tags \"Audit\" -MessageData $log\r\n    }\r\n}\r\ncatch {\r\n    $ex = $PSItem\r\n    if ($($ex.Exception.GetType().FullName -eq 'Microsoft.PowerShell.Commands.HttpResponseException') -or\r\n        $($ex.Exception.GetType().FullName -eq 'System.Net.WebException')) {\r\n        $errorObj = Resolve-MicrosoftGraphAPIError -ErrorObject $ex\r\n        $auditMessage = \"Error $($actionMessage). Error: $($errorObj.FriendlyMessage)\"\r\n        $warningMessage = \"Error at Line [$($errorObj.ScriptLineNumber)]: $($errorObj.Line). Error: $($errorObj.ErrorDetails)\"\r\n    }\r\n    else {\r\n        $auditMessage = \"Error $($actionMessage). Error: $($ex.Exception.Message)\"\r\n        $warningMessage = \"Error at Line [$($ex.InvocationInfo.ScriptLineNumber)]: $($ex.InvocationInfo.Line). Error: $($ex.Exception.Message)\"\r\n    }\r\n\r\n    $Log = @{\r\n        Action            = \"DisableAccount\" # optional. ENUM (undefined = default) \r\n        System            = \"EntraID\" # optional (free format text)\r\n        Message           = $auditMessage # required (free format text) \r\n        IsError           = $true # optional. Elastic reporting purposes only. (default = $false. $true = Executed action returned an error) \r\n        TargetDisplayName = $user.displayName # optional (free format text)\r\n        TargetIdentifier  = $user.userPrincipalName # optional (free format text)\r\n    }\r\n    Write-Information -Tags \"Audit\" -MessageData $log\r\n    Write-Warning $warningMessage\r\n    Write-Error $auditMessage\r\n}\r\n#endregion Entra ID action","runInCloud":false}
+'@ 
+
+Invoke-HelloIDDelegatedForm -DelegatedFormName $delegatedFormName -DynamicFormGuid $dynamicFormGuid -AccessGroups $delegatedFormAccessGroupGuids -Categories $delegatedFormCategoryGuids -UseFaIcon "True" -FaIcon "fa fa-unlock" -task $tmpTask -returnObject ([Ref]$delegatedFormRef) 
+<# End: Delegated Form #>
+
