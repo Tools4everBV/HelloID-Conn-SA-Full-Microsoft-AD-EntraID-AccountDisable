@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] - 2026-03-04
+
+### Fixed
+
+- Fixed revoke sign-in sessions functionality in Entra ID account disable task
+
 ## [1.0.0] - 2026-03-03
 
 This is the first official release of HelloID-Conn-SA-Full-Microsoft-AD-EntraID-AccountDisable. This release provides functionality to disable user accounts in both Active Directory and Microsoft Entra ID through a single HelloID Service Automation delegated form.
