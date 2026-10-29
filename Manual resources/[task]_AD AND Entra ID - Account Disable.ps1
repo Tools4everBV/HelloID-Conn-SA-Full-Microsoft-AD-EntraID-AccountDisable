@@ -1,6 +1,12 @@
 # variables configured in form
 $user = $form.gridUsers
-$blnRevokeSignInSessions = [System.Convert]::ToBoolean($form.blnRevokeSessions)
+# if in the UI blnRevokeSignInSessions is untouched, it contains a null value
+if ([string]::IsNullOrEmpty($form.blnRevokeSessions)) {
+    $blnRevokeSignInSessions = $false
+}
+else {
+    $blnRevokeSignInSessions = [System.Convert]::ToBoolean($form.blnRevokeSessions)
+}
 
 # Global variables
 # Outcommented as these are set from Global Variables
@@ -275,7 +281,7 @@ try {
         $Log = @{
             Action            = "DisableAccount" # optional. ENUM (undefined = default) 
             System            = "EntraID" # optional (free format text) 
-            Message           = "Revoked signin sessions of user [$($user.displayName)] with userPrincipalName [$($user.userPrincipalName)" # required (free format text) 
+            Message           = "Revoked signin sessions of user [$($user.displayName)] with userPrincipalName [$($user.userPrincipalName)]" # required (free format text) 
             IsError           = $false # optional. Elastic reporting purposes only. (default = $false. $true = Executed action returned an error) 
             TargetDisplayName = $user.displayName # optional (free format text)
             TargetIdentifier  = $user.userPrincipalName # optional (free format text)
